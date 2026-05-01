@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "semphr.h"
+
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -54,7 +56,7 @@
 
 /* USER CODE END PV */
 
-ts_Bmi160Data g_ImuData;
+ts_Bmi160_Data g_ImuData;
 SemaphoreHandle_t xDataMutex;
 /* USER CODE BEGIN PFP */
 
@@ -74,17 +76,23 @@ void vSensorReadTask(void *argument)
     }
     for(;;)
     {
-    	ts_Bmi160Data localData;
+    	ts_Bmi160_Data localData;
 
-    	if (Bmi160_Read(&localData, 0) == E_BMI160_ERR_NONE)
+    	if (Bmi160_Ioctl(E_BMI160_IOCTL_GET_ALL_DATA, &localData)  == E_BMI160_ERR_NONE)
     	{
     	    xSemaphoreTake(xDataMutex, portMAX_DELAY);
     	    g_ImuData = localData;
     	    xSemaphoreGive(xDataMutex);
 
     	    printf("GYRO -> X: %5d | Y: %5d | Z: %5d  ||  ACCEL -> X: %5d | Y: %5d | Z: %5d\r\n",
-    	           localData.rawGyroX,  localData.rawGyroY,  localData.rawGyroZ,
-    	           localData.rawAccelX, localData.rawAccelY, localData.rawAccelZ);
+    	           localData.rawGyrX,  localData.rawGyrY,  localData.rawGyrZ,
+    	           localData.rawAccX, localData.rawAccY, localData.rawAccZ);
+    	}
+    	else
+    	{
+
+    		printf("BMI160 read error!\r\n");
+
     	}
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -96,15 +104,15 @@ void vActivityTask(void *argument)
 
     for(;;)
     {
-    	ts_Bmi160Data localData;
+    	ts_Bmi160_Data localData;
 
     	xSemaphoreTake(xDataMutex, portMAX_DELAY);
     	localData = g_ImuData;
     	xSemaphoreGive(xDataMutex);
 
-    	if (abs(localData.rawAccelX) > threshold ||
-    	    abs(localData.rawAccelY) > threshold ||
-    	    abs(localData.rawAccelZ) > threshold)
+    	if (abs(localData.rawAccX) > threshold ||
+    	    abs(localData.rawAccY) > threshold ||
+    	    abs(localData.rawAccZ) > threshold)
     	{
     	    printf("\r\n************************************************\r\n");
     	    printf("  [ALARM] SERT HAREKET YAKALANDI! \r\n");
