@@ -6,7 +6,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
-#include "bmi160_hal.h"
+#include "../../Drivers/Driver_BMI160/Inc/bmi160_hal.h"
 #include "main.h"
 
 
@@ -82,6 +82,12 @@ te_Bmi160_ErrorCodes Bmi160_Close(void *vpParam);
 
 int8_t BMI160_IMU_TEST(uint32_t timeout_ms);
 
+void    IMU6x_vHWInit    (void);
+uint8_t IMU6x_uReadWhoAmI(void);
+void    IMU6x_vStart     (void);   /* soft reset + acc/gyr normal mode */
+
+/* Utility */
+void bmi160_delay_ms(unsigned long ms);
 
 #ifdef __cplusplus
 }
