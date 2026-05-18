@@ -28,9 +28,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "semphr.h"
-#include "../../Drivers/Driver_BMI160/Inc/bmi160_driver.h"
-#include "../../Drivers/Driver_Serial/Inc/serial_driver.h"
-#include "../../Drivers/Driver_Serial/Inc/serial_hal.h"
+#include "bmi160_driver.h"
+#include "serial_driver.h"
+#include "serial_hal.h"
+#include "slab.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -56,7 +58,6 @@
 #define WINDOW_SIZE                 40u
 
 #define GYRO_Z_THRESHOLD_RAW        1966
-
 #define ACCEL_XY_VARIANCE_THRESHOLD 2000000L
 #define GYRO_Z_SUM_THRESHOLD  (WINDOW_SIZE * GYRO_Z_THRESHOLD_RAW * 7 / 10)
 
@@ -69,6 +70,14 @@ static SemaphoreHandle_t xUartMutex = NULL;
 static TaskHandle_t xSensorTaskHandle = NULL;
 static TaskHandle_t xProcessingTaskHandle = NULL;
 static TaskHandle_t xDetectionTaskHandle = NULL;
+
+static StaticQueue_t xSensorQueueCB;
+static StaticQueue_t xDetectionQueueCB;
+static StaticSemaphore_t xUartMutexCB;
+
+static StaticTask_t xSensorTaskTCB;
+static StaticTask_t xProcessingTaskTCB;
+static StaticTask_t xDetectionTaskTCB;
 /* USER CODE END PD */
 
 /* USER CODE BEGIN PM */
@@ -91,6 +100,23 @@ void Debug_Print(const char *msg);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+void vApplicationGetIdleTaskMemory(StaticTask_t **ppxIdleTaskTCBBuffer, StackType_t **ppxIdleTaskStackBuffer, uint32_t *pulIdleTaskStackSize)
+{
+	static StaticTask_t xIdleTaskTCB;
+	static StackType_t xIdleTaskStack[configMINIMAL_STACK_SIZE];
+	*ppxIdleTaskTCBBuffer = &xIdleTaskTCB;
+	*ppxIdleTaskStackBuffer = xIdleTaskStack;
+	*pulIdleTaskStackSize = configMINIMAL_STACK_SIZE;
+}
+
+void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackType_t **ppxTimerTaskStackBuffer, uint32_t *pulTimerTaskStackSize)
+{
+	static StaticTask_t xTimerTaskTCB;
+	static StackType_t xTimerTaskStack[configTIMER_TASK_STACK_DEPTH];
+	*ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
+	*ppxTimerTaskStackBuffer = xTimerTaskStack;
+	*pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
+}
 
 void Serial_RxCallback(void *id)
 {
@@ -193,15 +219,14 @@ void vCircleDetectionTask(void *argument)
     static uint8_t windowIndex = 0;
     static uint8_t windowFull  = 0;
 
-
-    for (;;) {
+	for (;;)
+	{
         ts_Bmi160_Data localData;
 
 		if (xQueueReceive(xDetectionQueue, &localData, portMAX_DELAY) != pdTRUE)
 		{
 			continue;
 		}
-
 
 		window[windowIndex] = localData;
 		windowIndex = (uint8_t) ((windowIndex + 1u) % WINDOW_SIZE);
@@ -214,7 +239,6 @@ void vCircleDetectionTask(void *argument)
 
 		if (windowFull)
 		{
-
 
 			int32_t gyroZSum = 0;
 			int32_t quarter[4] = { 0, 0, 0, 0 };
@@ -252,7 +276,6 @@ void vCircleDetectionTask(void *argument)
 			{
 				int32_t dx = window[i].rawAccX - meanX;
 				int32_t dy = window[i].rawAccY - meanY;
-
 
 				varX += (int64_t) dx * dx;
 				varY += (int64_t) dy * dy;
@@ -345,6 +368,7 @@ int main(void)
 	/* Initialize all configured peripherals */
 	MX_GPIO_Init();
 	MX_I2C1_Init();
+	Slab_Init();
 
 //	MX_USART2_UART_Init();
 	//TODO: serial init. function has to be implemented included below definitions
@@ -363,29 +387,85 @@ int main(void)
 
 	HAL_UART_Receive_IT(&huart[USER_SERIAL_INDEX], &rxByte, 1);
 
-	xSensorQueue = xQueueCreate(SENSOR_QUEUE_LENGTH, sizeof(ts_Bmi160_Data));
-	xDetectionQueue = xQueueCreate(DETECTION_QUEUE_LENGTH, sizeof(ts_Bmi160_Data));
+	void *queueStorage;
 
-	xUartMutex = xSemaphoreCreateMutex();
+	queueStorage = Slab_Alloc(SENSOR_QUEUE_LENGTH * sizeof(ts_Bmi160_Data));
+	if (queueStorage != NULL)
+	{
+		xSensorQueue = xQueueCreateStatic(SENSOR_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), (uint8_t* )queueStorage,
+		&xSensorQueueCB);
+	}
+	else
+	{
+		printf("Sensor queue slab failed!\r\n");
+	}
+
+	queueStorage = Slab_Alloc(DETECTION_QUEUE_LENGTH * sizeof(ts_Bmi160_Data));
+	if (queueStorage != NULL)
+	{
+		xDetectionQueue = xQueueCreateStatic(DETECTION_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), (uint8_t* )queueStorage,
+		&xDetectionQueueCB);
+	}
+	else
+	{
+		printf("Sensor queue slab failed!\r\n");
+	}
+
+	xUartMutex = xSemaphoreCreateMutexStatic(&xUartMutexCB);
 
 	if (xSensorQueue == NULL || xDetectionQueue == NULL || xUartMutex == NULL)
 	{
 		printf("FreeRTOS object creation failed!\r\n");
 		Error_Handler();
 	}
-	if (xTaskCreate(vSensorReadTask, "SensRead", SENSOR_TASK_STACK_SIZE, NULL, SENSOR_TASK_PRIORITY, &xSensorTaskHandle) != pdPASS)
+
+	void *taskStack;
+
+	taskStack = Slab_Alloc(SLAB_LARGE_SIZE);
+	if (taskStack != NULL)
 	{
-		printf("Sensor task creation failed!\r\n");
+		xSensorTaskHandle = xTaskCreateStatic(vSensorReadTask, "SensRead",
+		SENSOR_TASK_STACK_SIZE,
+		NULL,
+		SENSOR_TASK_PRIORITY, (StackType_t*) taskStack, &xSensorTaskTCB);
+	}
+	else
+	{
+		printf("Slab alloc failed!\r\n");
 	}
 
-	if (xTaskCreate(vDataProcessingTask, "DataProc", PROCESSING_TASK_STACK_SIZE, NULL, PROCESSING_TASK_PRIORITY, &xProcessingTaskHandle) != pdPASS)
+	taskStack = Slab_Alloc(SLAB_LARGE_SIZE);
+	if (taskStack != NULL)
 	{
-		printf("Processing task creation failed!\r\n");
+		xProcessingTaskHandle = xTaskCreateStatic(vDataProcessingTask, "DataProc",
+		PROCESSING_TASK_STACK_SIZE,
+		NULL,
+		PROCESSING_TASK_PRIORITY, (StackType_t*) taskStack, &xProcessingTaskTCB);
+	}
+	else
+	{
+		printf("Slab alloc failed!\r\n");
 	}
 
-	if (xTaskCreate(vCircleDetectionTask, "CircDet", DETECTION_TASK_STACK_SIZE, NULL, DETECTION_TASK_PRIORITY, &xDetectionTaskHandle) != pdPASS)
+
+	taskStack = Slab_Alloc(SLAB_LARGE_SIZE);
+	if (taskStack != NULL)
 	{
-		printf("Detection task creation failed!\r\n");
+		xDetectionTaskHandle = xTaskCreateStatic(vCircleDetectionTask, "CircDet",
+		DETECTION_TASK_STACK_SIZE,
+		NULL,
+		DETECTION_TASK_PRIORITY, (StackType_t*) taskStack, &xDetectionTaskTCB);
+	}
+	else
+	{
+		printf("Slab alloc failed!\r\n");
+	}
+
+
+	if (xSensorTaskHandle == NULL || xProcessingTaskHandle == NULL || xDetectionTaskHandle == NULL)
+	{
+		printf("Task creation failed!\r\n");
+		Error_Handler();
 	}
 
 	printf("FreeRTOS is starting...\r\n");
