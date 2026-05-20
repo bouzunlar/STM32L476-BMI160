@@ -22,6 +22,7 @@
 #include "stm32l4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "interrupt.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -201,4 +202,26 @@ void USART2_IRQHandler(void)
     HAL_UART_IRQHandler(&huart[0]);
 }
 
+/**
+  * @brief This function handles EXTI line0 interrupt (BMI160 INT1 on PA0).
+  */
+void EXTI0_IRQHandler(void)
+{
+  HAL_GPIO_EXTI_IRQHandler(BMI160_INT_Pin);
+}
+
+/**
+  * @brief Central EXTI callback — routes GPIO interrupts to dispatch.
+  */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  switch (GPIO_Pin)
+  {
+    case BMI160_INT_Pin:
+      Interrupt_Dispatch(INTERRUPT_ID_BMI160_INT1);
+      break;
+    default:
+      break;
+  }
+}
 /* USER CODE END 1 */

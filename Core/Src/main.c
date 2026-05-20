@@ -30,6 +30,7 @@
 #include "bmi160_driver.h"
 #include "serial_driver.h"
 #include "serial_hal.h"
+#include "interrupt.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -98,6 +99,9 @@ static StaticTask_t xSensorTaskTCB;
 static StaticTask_t xProcessingTaskTCB;
 static StaticTask_t xDetectionTaskTCB;
 static StaticTask_t xUartTxTaskTCB;
+
+static SemaphoreHandle_t xBmi160DataReadySem = NULL;
+static StaticSemaphore_t xBmi160DataReadySemBuffer;
 
 /* USER CODE END PD */
 
@@ -172,16 +176,29 @@ void vSensorReadTask(void *argument)
 	}
 	Debug_Print("BMI160 Started!\r\n");
 
-	TickType_t xLastWakeTime = xTaskGetTickCount();
+	if (Bmi160_Ioctl(E_BMI160_IOCTL_REGISTER_INTERRUPT_HANDLER, (void*) xBmi160DataReadySem) != E_BMI160_ERR_NONE)
+	{
+		Debug_Print("BMI160: ISR register FAILED\r\n");
+	}
+
+	if (Bmi160_Ioctl(E_BMI160_IOCTL_ENABLE_INTERRUPT, NULL) != E_BMI160_ERR_NONE)
+	{
+		Debug_Print("BMI160: interrupt enable FAILED\r\n");
+	}
 
 	for (;;)
 	{
-//		Debug_Print("[TASK] Sensor running\r\n");
+		if (xSemaphoreTake(xBmi160DataReadySem, pdMS_TO_TICKS(100)) != pdTRUE)
+		{
+			g_diag.sensor_read_errors++;
+			Debug_Print("BMI160: DRDY timeout\r\n");
+			continue;
+		}
+
 		ts_Bmi160_Data localData;
 
 		if (Bmi160_Ioctl(E_BMI160_IOCTL_GET_ALL_DATA, &localData) == E_BMI160_ERR_NONE)
 		{
-
 			if (xQueueSend(xSensorQueue, &localData,pdMS_TO_TICKS(5)) != pdTRUE)
 			{
 				g_diag.sensor_queue_full++;
@@ -197,16 +214,11 @@ void vSensorReadTask(void *argument)
 
 				Debug_Print(debugMsg);
 			}
-
 		}
 		else
 		{
-
 			Debug_Print("BMI160 read error!\r\n");
-
 		}
-		vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));
-
 	}
 }
 
@@ -417,6 +429,8 @@ int main(void)
 	MX_GPIO_Init();
 	MX_I2C1_Init();
 
+	Interrupt_Init();
+
 	uint8_t serialIndex = USER_SERIAL_INDEX;
 	Serial_Open(&serialIndex);
 	Serial_Ioctl(E_SERIAL_IOCTL_ENABLE_DMA_TX, &serialIndex); //DMA started
@@ -429,7 +443,9 @@ int main(void)
 
 	xUartTxQueue = xQueueCreateStatic(UART_QUEUE_LENGTH, sizeof(UartMsg_t), ucUartTxQueueStorage, &xUartTxQueueCB);
 
-	if (xSensorQueue == NULL || xDetectionQueue == NULL || xUartTxQueue == NULL)
+	xBmi160DataReadySem = xSemaphoreCreateBinaryStatic(&xBmi160DataReadySemBuffer);
+
+	if (xSensorQueue == NULL || xDetectionQueue == NULL || xUartTxQueue == NULL || xBmi160DataReadySem == NULL)
 	{
 		printf("FreeRTOS object creation failed!\r\n");
 		Error_Handler();

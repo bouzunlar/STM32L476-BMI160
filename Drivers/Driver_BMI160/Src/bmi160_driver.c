@@ -1,11 +1,17 @@
-#include "../../Drivers/Driver_BMI160/Inc/bmi160_driver.h"
-#include "../../Drivers/Driver_BMI160/Inc/bmi160_hal.h"
+#include "bmi160_driver.h"
+#include "bmi160_hal.h"
 #include "FreeRTOS.h"
 #include "semphr.h"
+#include "task.h"
+#include "interrupt.h"
 #include <string.h>
 #include <stdio.h>
 
 extern I2C_HandleTypeDef hi2c1;
+
+static SemaphoreHandle_t bmi160_data_ready_sem = NULL;
+
+static void bmi160_int1_isr(void *context);
 
 static HAL_StatusTypeDef BMI160_IO_Write(uint8_t regAddr, uint8_t data)
 {
@@ -109,7 +115,6 @@ te_Bmi160_ErrorCodes Bmi160_Ioctl(te_Bmi160_IoctlCommands eCommand, void *vpPara
 {
 
 	ts_Bmi160_Data *pData;
-//	ts_Bmi160_Interrupt *pInt;
 
 	BMI160_ReadSensors();
 
@@ -191,25 +196,53 @@ te_Bmi160_ErrorCodes Bmi160_Ioctl(te_Bmi160_IoctlCommands eCommand, void *vpPara
 		break;
 
 		/* Interrupt */
-//		case E_BMI160_IOCTL_ENABLE_INTERRUPT:
-//			Gpio_IRQ_Enable();
-//			break;
-//
-//		case E_BMI160_IOCTL_REGISTER_INTERRUPT_HANDLER:
-//			pInt = (ts_Bmi160_Interrupt *)vpParam;
-//			Gpio_EnableInterrupt(BMI160_SENS_INT_PORTNUM,
-//								 BMI160_SENS_INT_PINNUM,
-//								 pInt->isFallingOrRising);
-//			Gpio_IRQ_Init(BMI160_SENS_INT_PORTNUM,
-//						  BMI160_SENS_INT_PINNUM,
-//						  pInt->interrupt_handler,
-//						  pInt->interrupt_id);
-//			break;
+	case E_BMI160_IOCTL_ENABLE_INTERRUPT:
+
+		BMI160_IO_Write(BMI160_REG_INT_OUT_CTRL,
+		BMI160_INT_OUT_CTRL_INT1_OUT_EN |
+		BMI160_INT_OUT_CTRL_INT1_LVL_HI |
+		BMI160_INT_OUT_CTRL_INT1_PUSHPULL);
+
+		BMI160_IO_Write(BMI160_REG_INT_LATCH, BMI160_INT_LATCH_NONE);
+		BMI160_IO_Write(BMI160_REG_INT_MAP_1, BMI160_INT_MAP_1_DRDY_INT1);
+		BMI160_IO_Write(BMI160_REG_INT_EN_1, BMI160_INT_EN_1_DRDY);
+
+		printf("BMI160: Interrupt enabled\r\n");
+		break;
+	case E_BMI160_IOCTL_REGISTER_INTERRUPT_HANDLER:
+		if (vpParam == NULL)
+		{
+			return E_BMI160_ERR_HW_ERROR;
+		}
+
+		bmi160_data_ready_sem = (SemaphoreHandle_t) vpParam;
+
+		if (Interrupt_Register(INTERRUPT_ID_BMI160_INT1, bmi160_int1_isr, NULL) != INTERRUPT_ERR_NONE)
+		{
+			return E_BMI160_ERR_HW_ERROR;
+		}
+
+		printf("BMI160: ISR registered with dispatch\r\n");
+		break;
+
 	default:
 		return E_BMI160_ERR_WRONG_IOCTL_CMD;
 	}
 
 	return E_BMI160_ERR_NONE;
+}
+
+/* ISR handler */
+static void bmi160_int1_isr(void *context)
+{
+	(void) context;
+
+	if (bmi160_data_ready_sem != NULL)
+	{
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+		xSemaphoreGiveFromISR(bmi160_data_ready_sem, &xHigherPriorityTaskWoken);
+		portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+	}
 }
 
 int8_t BMI160_IMU_TEST(uint32_t timeout_ms)

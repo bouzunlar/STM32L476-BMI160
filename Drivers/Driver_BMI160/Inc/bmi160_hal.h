@@ -18,6 +18,26 @@ extern "C" {
 #define BMI160_REG_GYR_RANGE       (0x43)   /* Gyro range                 */
 #define BMI160_REG_CMD             (0x7E)   /* Command register           */
 
+/* Interrupt configuration registers */
+#define BMI160_REG_INT_EN_1        (0x51)   /* Interrupt enable 1         */
+#define BMI160_REG_INT_OUT_CTRL    (0x53)   /* INT1/INT2 output behavior  */
+#define BMI160_REG_INT_LATCH       (0x54)   /* Latch mode for interrupts  */
+#define BMI160_REG_INT_MAP_1       (0x56)   /* Map interrupts to INT1/INT2 */
+
+/* INT_EN_1 bits */
+#define BMI160_INT_EN_1_DRDY       (0x10)   /* Data ready interrupt enable */
+
+/* INT_OUT_CTRL bits — INT1 */
+#define BMI160_INT_OUT_CTRL_INT1_OUT_EN  (0x08) /* INT1 output enable      */
+#define BMI160_INT_OUT_CTRL_INT1_LVL_HI  (0x02) /* INT1 active high        */
+#define BMI160_INT_OUT_CTRL_INT1_PUSHPULL (0x00) /* INT1 push-pull (default) */
+
+/* INT_LATCH values (bits [3:0]) */
+#define BMI160_INT_LATCH_NONE      (0x00)   /* Non-latched (pulsed)        */
+
+/* INT_MAP_1 bits — map data-ready to INT1 */
+#define BMI160_INT_MAP_1_DRDY_INT1 (0x80)   /* Route DRDY → INT1           */
+
 /*=========================================================================
     CMD VALUES
 =========================================================================*/
