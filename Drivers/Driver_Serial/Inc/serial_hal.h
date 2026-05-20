@@ -19,6 +19,14 @@ static const uint32_t serialPinSpeedList[SERIAL_TOTAL_NUM]=SERIAL_PIN_SPEED_LIST
 static const USART_TypeDef* serialUsartList[SERIAL_TOTAL_NUM]=SERIAL_USART_LIST;
 static const uint32_t serialBaudRateList[SERIAL_TOTAL_NUM]=SERIAL_USART_BAUDRATE_LIST;
 
+extern DMA_HandleTypeDef hdma_usart2_tx;
+static DMA_HandleTypeDef * const serialDmaHandleList[SERIAL_TOTAL_NUM] = SERIAL_DMA_HANDLE_LIST;
+
+static const DMA_Channel_TypeDef* serialDmaInstanceList[SERIAL_TOTAL_NUM] = SERIAL_DMA_INSTANCE_LIST;
+static const uint32_t serialDmaRequestList[SERIAL_TOTAL_NUM]              = SERIAL_DMA_REQUEST_LIST;
+static const IRQn_Type serialDmaIrqList[SERIAL_TOTAL_NUM]                 = SERIAL_DMA_IRQ_LIST;
+static const uint32_t serialAfList[SERIAL_TOTAL_NUM] = SERIAL_AF_LIST;
+static const IRQn_Type serialUartIrqList[SERIAL_TOTAL_NUM]             = SERIAL_UART_IRQ_LIST;
 
 #ifdef __cplusplus
 }

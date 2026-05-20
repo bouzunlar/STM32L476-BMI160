@@ -28,13 +28,26 @@ extern "C" {
 #define SERIAL_PULL_LIST 	{GPIO_NOPULL}
 #define SERIAL_PIN_SPEED_LIST	{GPIO_SPEED_FREQ_HIGH}
 
-#define serialClockEnable() 	do{__HAL_RCC_GPIOA_CLK_ENABLE();__HAL_RCC_USART2_CLK_ENABLE();}while(0)
+#define serialClockEnable() 	do{ __HAL_RCC_GPIOA_CLK_ENABLE();  \
+                                __HAL_RCC_USART2_CLK_ENABLE(); \
+                                __HAL_RCC_DMA1_CLK_ENABLE();   }while(0)
+
 #define serialClockDisable() 	do{__HAL_RCC_GPIOA_CLK_DISABLE();__HAL_RCC_USART2_CLK_DISABLE();}while(0)
 
 #define SERIAL_USART_LIST 			{USART2}
 #define SERIAL_USART_BAUDRATE_LIST	{115200}
 
 #define SERIAL_MAX_INTERRUPT_HANDLERS 8
+
+#define SERIAL_DMA_HANDLE_LIST    {&hdma_usart2_tx}
+#define SERIAL_DMA_INSTANCE_LIST  {DMA1_Channel7}
+#define SERIAL_DMA_REQUEST_LIST   {DMA_REQUEST_2}
+#define SERIAL_DMA_IRQ_LIST       {DMA1_Channel7_IRQn}
+#define SERIAL_DMA_IRQ_PRIORITY    5
+#define SERIAL_AF_LIST  		  {GPIO_AF7_USART2}
+
+#define SERIAL_UART_IRQ_LIST      {USART2_IRQn}
+#define SERIAL_UART_IRQ_PRIORITY   6
 
 
 #endif /* BOARD_H_ */

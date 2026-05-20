@@ -1,12 +1,18 @@
-#include "../../Drivers/Driver_Serial/Inc/serial_driver.h"
-#include "../../Drivers/Driver_Serial/Inc/serial_hal.h"
+#include "serial_driver.h"
+#include "serial_hal.h"
 #include <stdint.h>
 
 static void Serial_vInit(void);
 static void Serial_vDisable(uint8_t index);
 static void Serial_vIndividualInit(uint8_t cnt);
+static void Serial_vIndividualInitDMA(uint8_t cnt);
 
 UART_HandleTypeDef huart[SERIAL_TOTAL_NUM];
+DMA_HandleTypeDef hdma_usart2_tx;
+
+static uint8_t serialDmaEnabled[SERIAL_TOTAL_NUM];
+
+serialInterrupt_t serial_irq_context[SERIAL_MAX_INTERRUPT_HANDLERS];
 
 serialErrorCodes_t Serial_Open(void *vpParam)
 {
@@ -25,24 +31,41 @@ serialErrorCodes_t Serial_Open(void *vpParam)
 	}
 	return E_SERIAL_ERR_NONE;
 }
+
 serialErrorCodes_t Serial_Ioctl(SERIAL_IOCTL_COMMANDS_T eCommand, void *vpParam)
 {
-	serialInterrupt_t sSerialInterrupt = *(serialInterrupt_t*) vpParam;
 	switch (eCommand)
 	{
 	case E_SERIAL_IOCTL_GET_VERSION:
 		*(float*) vpParam = SERIAL_MODULE_SW_VERSION;
 		break;
+	case E_SERIAL_IOCTL_ENABLE_DMA_TX:
+	{
+		uint8_t index = *(uint8_t*) vpParam;
+		if (index >= SERIAL_TOTAL_NUM)
+		{
+			return E_SERIAL_ERR_WRONG_INDEX;
+		}
+		if (serialDmaEnabled[index] == 0u)
+		{
+			Serial_vIndividualInitDMA(index);
+		}
+		break;
+	}
 	case E_SERIAL_IOCTL_ENABLE_INTERRUPT:
+	{
+		serialInterrupt_t sSerialInterrupt = *(serialInterrupt_t*) vpParam;
 		if (sSerialInterrupt.index >= SERIAL_TOTAL_NUM)
 		{
 			return E_SERIAL_ERR_WRONG_INDEX;
 		}
 		__HAL_UART_ENABLE_IT(&huart[sSerialInterrupt.index], UART_IT_RXNE);
-            printf("[SERIAL] RX interrupt activated (index=%d)\r\n",
-                   sSerialInterrupt.index);
+		printf("[SERIAL] RX interrupt activated (index=%d)\r\n", sSerialInterrupt.index);
 		break;
+	}
 	case E_SERIAL_IOCTL_DISABLE_INTERRUPT:
+	{
+		serialInterrupt_t sSerialInterrupt = *(serialInterrupt_t*) vpParam;
 		if (sSerialInterrupt.index >= SERIAL_TOTAL_NUM)
 		{
 			return E_SERIAL_ERR_WRONG_INDEX;
@@ -50,7 +73,10 @@ serialErrorCodes_t Serial_Ioctl(SERIAL_IOCTL_COMMANDS_T eCommand, void *vpParam)
 		__HAL_UART_DISABLE_IT(&huart[sSerialInterrupt.index], UART_IT_RXNE);
 		printf("RX interrupt disabled (index=%d)\r\n", sSerialInterrupt.index);
 		break;
+	}
 	case E_SERIAL_IOCTL_REGISTER_IRQ_HANDLER:
+	{
+		serialInterrupt_t sSerialInterrupt = *(serialInterrupt_t*) vpParam;
 		if (sSerialInterrupt.index >= SERIAL_TOTAL_NUM)
 		{
 			return E_SERIAL_ERR_WRONG_INDEX;
@@ -61,6 +87,7 @@ serialErrorCodes_t Serial_Ioctl(SERIAL_IOCTL_COMMANDS_T eCommand, void *vpParam)
 		serial_irq_context[sSerialInterrupt.index].isInterruptOccured = sSerialInterrupt.isInterruptOccured;
 		serial_irq_context[sSerialInterrupt.index].type = sSerialInterrupt.type;
 		break;
+	}
 	default:
 		return E_SERIAL_ERR_WRONG_IOCTL_CMD;
 		break;
@@ -84,6 +111,34 @@ serialErrorCodes_t Serial_Write(const void *pvBuffer, const uint32_t xBytes)
 	HAL_MAX_DELAY) != HAL_OK)
 	{
 		printf("TX Error (index=%d)\r\n", serialWrite->index);
+		return E_SERIAL_ERR_HW_ERROR;
+	}
+
+	return E_SERIAL_ERR_NONE;
+}
+
+serialErrorCodes_t Serial_Write_DMA(const void *pvBuffer, const uint32_t xBytes)
+{
+	SerialReadWrite_t *serialWrite = (SerialReadWrite_t*) pvBuffer;
+	if (serialWrite->index >= SERIAL_TOTAL_NUM)
+	{
+		return E_SERIAL_ERR_WRONG_INDEX;
+	}
+	if (serialWrite->ptr == NULL || serialWrite->length == 0u)
+	{
+		return E_SERIAL_ERR_HW_ERROR;
+	}
+	if (serialDmaEnabled[serialWrite->index] == 0u)
+	{
+		return E_SERIAL_ERR_DMA_NOT_ENABLED;
+	}
+	if (huart[serialWrite->index].gState != HAL_UART_STATE_READY)
+	{
+		return E_SERIAL_ERR_HW_ERROR;
+	}
+
+	if (HAL_UART_Transmit_DMA(&huart[serialWrite->index], (uint8_t*) serialWrite->ptr, serialWrite->length) != HAL_OK)
+	{
 		return E_SERIAL_ERR_HW_ERROR;
 	}
 
@@ -123,6 +178,7 @@ serialErrorCodes_t Serial_Close(void *vpParam)
 
 	return E_SERIAL_ERR_NONE;
 }
+
 void Serial_IRQ_Dispatch(uint8_t index)
 {
 	if (index >= SERIAL_TOTAL_NUM)
@@ -138,6 +194,13 @@ void Serial_IRQ_Dispatch(uint8_t index)
 	}
 }
 
+void Serial_DMA_TX_IRQHandler(uint8_t index)
+{
+	if (index < SERIAL_TOTAL_NUM)
+	{
+		HAL_DMA_IRQHandler(serialDmaHandleList[index]);
+	}
+}
 
 static void Serial_vIndividualInit(uint8_t cnt)
 {
@@ -149,6 +212,7 @@ static void Serial_vIndividualInit(uint8_t cnt)
 	GPIO_InitStruct.Mode = serialFunctionList[cnt];
 	GPIO_InitStruct.Pull = serialPullList[cnt];
 	GPIO_InitStruct.Speed = serialPinSpeedList[cnt];
+	GPIO_InitStruct.Alternate = serialAfList[cnt];
 	HAL_GPIO_Init((GPIO_TypeDef*) serialPortList[cnt], &GPIO_InitStruct);
 
 	huart[cnt].Instance = (USART_TypeDef*) serialUsartList[cnt];
@@ -170,6 +234,39 @@ static void Serial_vIndividualInit(uint8_t cnt)
 	}
 }
 
+static void Serial_vIndividualInitDMA(uint8_t cnt)
+{
+
+	__HAL_RCC_DMA1_CLK_ENABLE();
+
+	serialDmaHandleList[cnt]->Instance = (DMA_Channel_TypeDef*) serialDmaInstanceList[cnt];
+	serialDmaHandleList[cnt]->Init.Request = serialDmaRequestList[cnt];
+	serialDmaHandleList[cnt]->Init.Direction = DMA_MEMORY_TO_PERIPH;
+	serialDmaHandleList[cnt]->Init.PeriphInc = DMA_PINC_DISABLE;
+	serialDmaHandleList[cnt]->Init.MemInc = DMA_MINC_ENABLE;
+	serialDmaHandleList[cnt]->Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+	serialDmaHandleList[cnt]->Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+	serialDmaHandleList[cnt]->Init.Mode = DMA_NORMAL;
+	serialDmaHandleList[cnt]->Init.Priority = DMA_PRIORITY_LOW;
+
+	if (HAL_DMA_Init(serialDmaHandleList[cnt]) != HAL_OK)
+	{
+		printf("DMA init error (index=%d)\r\n", cnt);
+		return;
+	}
+
+	__HAL_LINKDMA(&huart[cnt], hdmatx, *serialDmaHandleList[cnt]);
+
+	HAL_NVIC_SetPriority(serialDmaIrqList[cnt], SERIAL_DMA_IRQ_PRIORITY, 0u);
+	HAL_NVIC_EnableIRQ(serialDmaIrqList[cnt]);
+
+	HAL_NVIC_SetPriority(serialUartIrqList[cnt], SERIAL_UART_IRQ_PRIORITY, 0u);
+	HAL_NVIC_EnableIRQ(serialUartIrqList[cnt]);
+
+	serialDmaEnabled[cnt] = 1u;
+	printf("DMA TX enabled (index=%d)\r\n", cnt);
+}
+
 static void Serial_vInit(void)
 {
 	uint8_t cnt;
@@ -182,18 +279,29 @@ static void Serial_vInit(void)
 static void Serial_vDisable(uint8_t index)
 {
 	GPIO_InitTypeDef GPIO_InitStruct = { 0 };
-	if (index == SERIAL_TOTAL_NUM)
+
+	if (serialDmaEnabled[index] != 0u)
+	{
+		HAL_NVIC_DisableIRQ(serialUartIrqList[index]);
+		HAL_NVIC_DisableIRQ(serialDmaIrqList[index]);
+		HAL_DMA_DeInit(serialDmaHandleList[index]);
+		serialDmaEnabled[index] = 0u;
+	}
+
+	HAL_UART_DeInit(&huart[index]);
+
+	if (index == (SERIAL_TOTAL_NUM - 1u))
 	{
 		serialClockDisable();
 	}
+
 	GPIO_InitStruct.Pin = serialPinList[index];
 	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
 	GPIO_InitStruct.Pull = serialPullList[index];
 	GPIO_InitStruct.Speed = serialPinSpeedList[index];
 	HAL_GPIO_Init((GPIO_TypeDef*) serialPortList[index], &GPIO_InitStruct);
 
-	HAL_UART_DeInit(&huart[index]);
-	printf("UART disabled. (index=%d)\r\n", index);
+	printf("UART disabled (index=%d)\r\n", index);
 }
 
 int8_t SERIAL_TEST(uint32_t timeout)
@@ -222,9 +330,7 @@ int8_t SERIAL_TEST(uint32_t timeout)
 		{
 			printf("TEST OK (index=%d)\r\n", i);
 		}
-
 		HAL_Delay(200u);
 	}
-
 	return (failCount == 0u) ? 0 : -1;
 }

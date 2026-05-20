@@ -188,5 +188,17 @@ void TIM6_DAC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+extern DMA_HandleTypeDef hdma_usart2_tx;
+extern UART_HandleTypeDef huart[];
+
+void DMA1_Channel7_IRQHandler(void)
+{
+    HAL_DMA_IRQHandler(&hdma_usart2_tx);
+}
+
+void USART2_IRQHandler(void)
+{
+    HAL_UART_IRQHandler(&huart[0]);
+}
 
 /* USER CODE END 1 */

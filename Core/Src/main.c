@@ -18,7 +18,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "cmsis_os.h"
 #include "i2c.h"
 #include "usart.h"
 #include "gpio.h"
@@ -59,10 +58,10 @@ typedef struct
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define SENSOR_TASK_STACK_SIZE      512u
-#define PROCESSING_TASK_STACK_SIZE  384u
-#define DETECTION_TASK_STACK_SIZE   384u
-#define UART_TASK_STACK_SIZE        256u
+#define SENSOR_TASK_STACK_SIZE      1024u
+#define PROCESSING_TASK_STACK_SIZE  512u
+#define DETECTION_TASK_STACK_SIZE   512u
+#define UART_TASK_STACK_SIZE        512u
 
 #define SENSOR_TASK_PRIORITY        3u
 #define PROCESSING_TASK_PRIORITY    2u
@@ -72,7 +71,7 @@ typedef struct
 #define SENSOR_QUEUE_LENGTH         5u
 #define DETECTION_QUEUE_LENGTH      5u
 #define UART_QUEUE_LENGTH           32u
-#define WINDOW_SIZE                 40u
+#define WINDOW_SIZE                 32u
 
 #define GYRO_Z_THRESHOLD_RAW        1966
 #define ACCEL_XY_VARIANCE_THRESHOLD 2000000L
@@ -119,14 +118,13 @@ static uint8_t ucSensorQueueStorage[SENSOR_QUEUE_LENGTH * sizeof(ts_Bmi160_Data)
 static uint8_t ucDetectionQueueStorage[DETECTION_QUEUE_LENGTH * sizeof(ts_Bmi160_Data)];
 static uint8_t ucUartTxQueueStorage[UART_QUEUE_LENGTH * sizeof(UartMsg_t)];
 
-serialInterrupt_t serial_irq_context[SERIAL_MAX_INTERRUPT_HANDLERS] = { 0 };
-
-static uint8_t rxByte = 0;
-
 volatile SystemDiagnostics_t g_diag = { 0 };
 
 /* USER CODE END PV */
 
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+void MX_FREERTOS_Init(void);
 /* USER CODE BEGIN PFP */
 void Debug_Print(const char *msg);
 
@@ -151,11 +149,6 @@ void vApplicationGetTimerTaskMemory(StaticTask_t **ppxTimerTaskTCBBuffer, StackT
 	*ppxTimerTaskTCBBuffer = &xTimerTaskTCB;
 	*ppxTimerTaskStackBuffer = xTimerTaskStack;
 	*pulTimerTaskStackSize = configTIMER_TASK_STACK_DEPTH;
-}
-
-void Serial_RxCallback(void *id)
-{
-	HAL_UART_Receive_IT(&huart[USER_SERIAL_INDEX], &rxByte, 1);
 }
 
 void vSensorReadTask(void *argument)
@@ -347,17 +340,12 @@ void vCircleDetectionTask(void *argument)
 					Debug_Print("************************************************\r\n");
 				}
 			}
-			else
-			{
-				g_diag.uart_mutex_timeouts++;
-			}
 
 			//TODO: UART packet format implementation has to be done.
 
 			//TODO: Sending uart data.
 
 		}
-
 		else
 		{
 			g_diag.upstream_timeouts++;
@@ -376,7 +364,16 @@ void vUartTxTask(void *argument)
 			txCtx.index = USER_SERIAL_INDEX;
 			txCtx.ptr = (uint8_t*) pkt.msg;
 			txCtx.length = pkt.len;
-			Serial_Write(&txCtx, pkt.len);
+			if (Serial_Write_DMA(&txCtx, pkt.len) == E_SERIAL_ERR_NONE)
+			{
+				ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+			}
+			else
+			{
+				//TODO: error handling
+			}
+
 		}
 	}
 }
@@ -412,49 +409,25 @@ void Debug_Print(const char *msg)
 int main(void)
 {
 
-	/* USER CODE BEGIN 1 */
-
-	/* USER CODE END 1 */
-
-	/* MCU Configuration--------------------------------------------------------*/
-
 	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
 	HAL_Init();
-
-	/* USER CODE BEGIN Init */
-
-	/* USER CODE END Init */
-
-	/* USER CODE BEGIN SysInit */
-
-	/* USER CODE END SysInit */
-
+	/* Configure the system clock */
+	SystemClock_Config();
 	/* Initialize all configured peripherals */
 	MX_GPIO_Init();
 	MX_I2C1_Init();
 
-//	MX_USART2_UART_Init();
-	//TODO: serial init. function has to be implemented included below definitions
 	uint8_t serialIndex = USER_SERIAL_INDEX;
 	Serial_Open(&serialIndex);
+	Serial_Ioctl(E_SERIAL_IOCTL_ENABLE_DMA_TX, &serialIndex); //DMA started
+
 	printf("Serial driver started\r\n");
-	serialInterrupt_t rxInt;
-	rxInt.index = USER_SERIAL_INDEX;
-	rxInt.interrupt_handler = Serial_RxCallback;
-	rxInt.interrupt_id = USER_SERIAL_INDEX;
-	rxInt.isInterruptOccured = 0;
-	rxInt.type = 0;
-	Serial_Ioctl(E_SERIAL_IOCTL_REGISTER_IRQ_HANDLER, &rxInt);
-
-	Serial_Ioctl(E_SERIAL_IOCTL_ENABLE_INTERRUPT, &rxInt);
-
-	HAL_UART_Receive_IT(&huart[USER_SERIAL_INDEX], &rxByte, 1);
 
 	xSensorQueue = xQueueCreateStatic(SENSOR_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), ucSensorQueueStorage, &xSensorQueueCB);
 
 	xDetectionQueue = xQueueCreateStatic(DETECTION_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), ucDetectionQueueStorage, &xDetectionQueueCB);
 
-	xUartTxQueue = xQueueCreateStatic(8u, sizeof(UartMsg_t), ucUartTxQueueStorage, &xUartTxQueueCB);
+	xUartTxQueue = xQueueCreateStatic(UART_QUEUE_LENGTH, sizeof(UartMsg_t), ucUartTxQueueStorage, &xUartTxQueueCB);
 
 	if (xSensorQueue == NULL || xDetectionQueue == NULL || xUartTxQueue == NULL)
 	{
@@ -540,16 +513,50 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart->Instance == USART2)
+	{
+		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+		if (xUartTxTaskHandle != NULL)
+		{
+			vTaskNotifyGiveFromISR(xUartTxTaskHandle, &xHigherPriorityTaskWoken);
+			portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+		}
+	}
+}
+
 int _write(int file, char *ptr, int len)
 {
 
 //	HAL_UART_Transmit(&huart2, (uint8_t*) ptr, len, HAL_MAX_DELAY);
-	SerialReadWrite_t txCtx;
-	txCtx.index = USER_SERIAL_INDEX;
-	txCtx.ptr = (uint8_t*) ptr;
-	txCtx.length = (uint16_t) len;
-	Serial_Write(&txCtx, (uint32_t) len);
-	return len;
+	 if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
+	    {
+	        if (xUartTxQueue != NULL)
+	        {
+	            UartMsg_t pkt;
+	            int written = snprintf(pkt.msg, sizeof(pkt.msg), "%.*s", len, ptr);
+	            pkt.len = (uint16_t)((written > 0) ? written : 0);
+	            xQueueSend(xUartTxQueue, &pkt, pdMS_TO_TICKS(5));
+	        }
+	        return len;
+	    }
+
+	    SerialReadWrite_t txCtx;
+	    txCtx.index  = USER_SERIAL_INDEX;
+	    txCtx.ptr    = (uint8_t*) ptr;
+	    txCtx.length = (uint16_t) len;
+	    Serial_Write(&txCtx, (uint32_t) len);
+	    return len;
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    // Breakpoint here 
+    taskDISABLE_INTERRUPTS();
+    for(;;);
 }
 /* USER CODE END 4 */
 
