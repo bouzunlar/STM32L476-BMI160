@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "interrupt.h"
+#include "board.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -203,11 +204,11 @@ void USART2_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles EXTI line0 interrupt (BMI160 INT1 on PA0).
+  * @brief This function handles EXTI line0 interrupt (BMI160 INT1).
   */
 void EXTI0_IRQHandler(void)
 {
-  HAL_GPIO_EXTI_IRQHandler(BMI160_INT_Pin);
+  HAL_GPIO_EXTI_IRQHandler(BMI160_INT1_PIN);
 }
 
 /**
@@ -217,7 +218,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   switch (GPIO_Pin)
   {
-    case BMI160_INT_Pin:
+    case BMI160_INT1_PIN:
       Interrupt_Dispatch(INTERRUPT_ID_BMI160_INT1);
       break;
     default:

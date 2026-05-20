@@ -6,7 +6,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
-#include "../../Drivers/Driver_BMI160/Inc/bmi160_hal.h"
+#include "bmi160_hal.h"
 #include "main.h"
 
 

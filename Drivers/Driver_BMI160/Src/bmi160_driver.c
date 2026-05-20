@@ -13,6 +13,22 @@ static SemaphoreHandle_t bmi160_data_ready_sem = NULL;
 
 static void bmi160_int1_isr(void *context);
 
+void IMU6x_vHWInit(void)
+{
+	GPIO_InitTypeDef gpio = { 0 };
+
+	bmi160ClockEnable();
+
+	gpio.Pin   = BMI160_INT1_PIN;
+	gpio.Mode  = GPIO_MODE_IT_RISING;
+	gpio.Pull  = GPIO_NOPULL;
+	gpio.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(BMI160_INT1_PORT, &gpio);
+
+	HAL_NVIC_SetPriority(BMI160_INT1_EXTI_IRQn, BMI160_INT1_IRQ_PRIORITY, 0u);
+	HAL_NVIC_EnableIRQ(BMI160_INT1_EXTI_IRQn);
+}
+
 static HAL_StatusTypeDef BMI160_IO_Write(uint8_t regAddr, uint8_t data)
 {
 	return HAL_I2C_Mem_Write(&hi2c1, BMI160_ADDR, regAddr, 1, &data, 1, 100);
@@ -79,6 +95,7 @@ static te_Bmi160_ErrorCodes BMI160_vInit(void)
 
 te_Bmi160_ErrorCodes Bmi160_Open(void *vpParam)
 {
+	IMU6x_vHWInit();
 
 	if (IMU6x_uReadWhoAmI() != BMI160_CHIP_ID)
 	{

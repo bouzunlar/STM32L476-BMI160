@@ -50,4 +50,13 @@ extern "C" {
 #define SERIAL_UART_IRQ_PRIORITY   6
 
 
+/// BMI160
+#define BMI160_INT1_PORT          GPIOA
+#define BMI160_INT1_PIN           GPIO_PIN_0
+#define BMI160_INT1_EXTI_IRQn     EXTI0_IRQn
+#define BMI160_INT1_IRQ_PRIORITY  5
+
+#define bmi160ClockEnable()  do{ __HAL_RCC_GPIOA_CLK_ENABLE(); }while(0)
+
+
 #endif /* BOARD_H_ */
