@@ -32,6 +32,8 @@
 #include "serial_driver.h"
 #include "serial_hal.h"
 #include "interrupt.h"
+#include "filter.h"
+#include "detection.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -56,18 +58,6 @@ typedef struct
 	uint32_t uart_mutex_timeouts;
 } SystemDiagnostics_t;
 
-/* Output of the filtering stage.*/
-typedef struct
-{
-	ts_Bmi160_Data raw;        /* original sensor frame (raw + scaled)   */
-	float          fAccX;      /* filtered accel X [g]                   */
-	float          fAccY;      /* filtered accel Y [g]                   */
-	float          fAccZ;      /* filtered accel Z [g]                   */
-	float          fGyrX;      /* filtered gyro  X [dps]                 */
-	float          fGyrY;      /* filtered gyro  Y [dps]                 */
-	float          fGyrZ;      /* filtered gyro  Z [dps]                 */
-	uint32_t       seq;        /* monotonic sequence number              */
-} ts_Processed_Data;
 
 /* USER CODE END PTD */
 
@@ -86,14 +76,6 @@ typedef struct
 #define SENSOR_QUEUE_LENGTH         5u
 #define DETECTION_QUEUE_LENGTH      5u
 #define UART_QUEUE_LENGTH           32u
-#define WINDOW_SIZE                 32u
-
-#define GYRO_Z_MEAN_DPS_THRESHOLD         120.0f  /* mean |rotation| over window */
-#define ACCEL_XY_VARIANCE_G2_THRESHOLD    0.25f   /* variance in g²              */
-
-/* EMA smoothing coefficient. y[n] = α·x[n] + (1-α)·y[n-1]
- * α=0.20 @ 100Hz → ~3.5 Hz cutoff, for hand-motion bandwidth (0-10 Hz). */
-#define EMA_ALPHA                         0.20f
 
 #define QUEUE_RECV_TIMEOUT_MS   	200u
 
@@ -246,11 +228,7 @@ void vDataProcessingTask(void *argument)
 {
 	Debug_Print("[PROC TASK CREATED]\r\n");
 
-	/* EMA filter state */
-	static float    ema_aX = 0.0f, ema_aY = 0.0f, ema_aZ = 0.0f;
-	static float    ema_gX = 0.0f, ema_gY = 0.0f, ema_gZ = 0.0f;
-	static uint8_t  ema_init = 0u;
-	static uint32_t seqCounter = 0u;
+	Filter_Init();
 
 	for (;;)
 	{
@@ -258,37 +236,8 @@ void vDataProcessingTask(void *argument)
 
 		if (xQueueReceive(xSensorQueue, &rawData, pdMS_TO_TICKS(QUEUE_RECV_TIMEOUT_MS)) == pdTRUE)
 		{
-			if (!ema_init)
-			{
-				ema_aX = rawData.scaledAccX;
-				ema_aY = rawData.scaledAccY;
-				ema_aZ = rawData.scaledAccZ;
-				ema_gX = rawData.scaledGyrX;
-				ema_gY = rawData.scaledGyrY;
-				ema_gZ = rawData.scaledGyrZ;
-				ema_init = 1u;
-			}
-			else
-			{
-				const float a = EMA_ALPHA;
-				const float b = 1.0f - EMA_ALPHA;
-				ema_aX = a * rawData.scaledAccX + b * ema_aX;
-				ema_aY = a * rawData.scaledAccY + b * ema_aY;
-				ema_aZ = a * rawData.scaledAccZ + b * ema_aZ;
-				ema_gX = a * rawData.scaledGyrX + b * ema_gX;
-				ema_gY = a * rawData.scaledGyrY + b * ema_gY;
-				ema_gZ = a * rawData.scaledGyrZ + b * ema_gZ;
-			}
-
 			ts_Processed_Data out;
-			out.raw   = rawData;
-			out.fAccX = ema_aX;
-			out.fAccY = ema_aY;
-			out.fAccZ = ema_aZ;
-			out.fGyrX = ema_gX;
-			out.fGyrY = ema_gY;
-			out.fGyrZ = ema_gZ;
-			out.seq   = seqCounter++;
+			Filter_Apply(&rawData, &out);
 
 			if (xQueueSend(xDetectionQueue, &out, pdMS_TO_TICKS(5)) != pdTRUE)
 			{
@@ -306,112 +255,32 @@ void vCircleDetectionTask(void *argument)
 {
 	Debug_Print("[DETECT TASK CREATED]\r\n");
 
-	static ts_Processed_Data window[WINDOW_SIZE];
-	static uint8_t windowIndex = 0;
-	static uint8_t windowFull = 0;
+	Detection_Init();
 
 	for (;;)
 	{
-		ts_Processed_Data localData;
+		ts_Processed_Data sample;
 
-		if (xQueueReceive(xDetectionQueue, &localData, pdMS_TO_TICKS(QUEUE_RECV_TIMEOUT_MS)) == pdTRUE)
+		if (xQueueReceive(xDetectionQueue, &sample, pdMS_TO_TICKS(QUEUE_RECV_TIMEOUT_MS)) == pdTRUE)
 		{
+			ts_Detection_Result result = Detection_Process(&sample);
 
-			window[windowIndex] = localData;
-			windowIndex = (uint8_t) ((windowIndex + 1u) % WINDOW_SIZE);
-			if (windowIndex == 0u)
+			if (result.detected)
 			{
-				windowFull = 1;
-			}
+				g_diag.circle_detections++;
 
-			uint8_t circleFlag = 0;
+				char msg[96];
+				snprintf(msg, sizeof(msg),
+					"[ALARM] CIRCULAR MOTION DETECTED! %s | meanGyrZ=%.1f dps varX=%.3f varY=%.3f\r\n",
+					(result.direction > 0) ? "CW" : "CCW",
+					result.meanGyrZ, result.varX, result.varY);
 
-			if (windowFull)
-			{
+				Debug_Print("\r\n************************************************\r\n");
+				Debug_Print(msg);
+				Debug_Print("************************************************\r\n");
 
-				float gyroZSum = 0.0f;
-				float quarter[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
-				{
-					gyroZSum += window[i].fGyrZ;
-					quarter[i / (WINDOW_SIZE / 4)] += window[i].fGyrZ;
-				}
-
-				uint8_t directionConsistent = 1;
-				int8_t expectedSign = (gyroZSum > 0.0f) ? 1 : -1;
-				for (uint8_t q = 0; q < 4; q++)
-				{
-					int8_t qSign = (quarter[q] > 0.0f) ? 1 : -1;
-					if (qSign != expectedSign)
-					{
-						directionConsistent = 0;
-						break;
-					}
-				}
-
-				float meanX = 0.0f, meanY = 0.0f;
-				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
-				{
-					meanX += window[i].fAccX;
-					meanY += window[i].fAccY;
-				}
-				meanX /= (float) WINDOW_SIZE;
-				meanY /= (float) WINDOW_SIZE;
-
-				float varX = 0.0f, varY = 0.0f, covXY = 0.0f;
-				uint8_t zcx = 0, zcy = 0;
-
-				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
-				{
-					float dx = window[i].fAccX - meanX;
-					float dy = window[i].fAccY - meanY;
-
-					varX  += dx * dx;
-					varY  += dy * dy;
-					covXY += dx * dy;
-
-					if (i > 0)
-					{
-						float prev_dx = window[i - 1].fAccX - meanX;
-						float prev_dy = window[i - 1].fAccY - meanY;
-
-						if ((prev_dx > 0.0f && dx <= 0.0f) || (prev_dx < 0.0f && dx >= 0.0f))
-							zcx++;
-						if ((prev_dy > 0.0f && dy <= 0.0f) || (prev_dy < 0.0f && dy >= 0.0f))
-							zcy++;
-					}
-				}
-				varX  /= (float) WINDOW_SIZE;
-				varY  /= (float) WINDOW_SIZE;
-				covXY /= (float) WINDOW_SIZE;
-
-				uint8_t notStraightLine = ((covXY * covXY) < (varX * varY * 0.5f));
-				uint8_t isFullCircle = (zcx >= 2) && (zcy >= 2);
-				float   meanGyroZ       = fabsf(gyroZSum) / (float) WINDOW_SIZE;
-
-				if (directionConsistent &&
-					notStraightLine &&
-					isFullCircle &&
-					meanGyroZ > GYRO_Z_MEAN_DPS_THRESHOLD &&
-					varX > ACCEL_XY_VARIANCE_G2_THRESHOLD &&
-					varY > ACCEL_XY_VARIANCE_G2_THRESHOLD)
-				{
-					circleFlag = 1;
-
-					windowFull = 0;
-					windowIndex = 0;
-					memset(window, 0, sizeof(window));
 					xQueueReset(xDetectionQueue);
 				}
-
-				if (circleFlag)
-				{
-					Debug_Print("\r\n************************************************\r\n");
-					Debug_Print("[ALARM] CIRCULAR MOTION DETECTED!\r\n");
-					Debug_Print("************************************************\r\n");
-				}
-			}
-
 			//TODO: UART packet format implementation has to be done.
 
 			//TODO: Sending uart data.
