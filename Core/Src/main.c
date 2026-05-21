@@ -56,6 +56,19 @@ typedef struct
 	uint32_t uart_mutex_timeouts;
 } SystemDiagnostics_t;
 
+/* Output of the filtering stage.*/
+typedef struct
+{
+	ts_Bmi160_Data raw;        /* original sensor frame (raw + scaled)   */
+	float          fAccX;      /* filtered accel X [g]                   */
+	float          fAccY;      /* filtered accel Y [g]                   */
+	float          fAccZ;      /* filtered accel Z [g]                   */
+	float          fGyrX;      /* filtered gyro  X [dps]                 */
+	float          fGyrY;      /* filtered gyro  Y [dps]                 */
+	float          fGyrZ;      /* filtered gyro  Z [dps]                 */
+	uint32_t       seq;        /* monotonic sequence number              */
+} ts_Processed_Data;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -77,6 +90,10 @@ typedef struct
 
 #define GYRO_Z_MEAN_DPS_THRESHOLD         120.0f  /* mean |rotation| over window */
 #define ACCEL_XY_VARIANCE_G2_THRESHOLD    0.25f   /* variance in g²              */
+
+/* EMA smoothing coefficient. y[n] = α·x[n] + (1-α)·y[n-1]
+ * α=0.20 @ 100Hz → ~3.5 Hz cutoff, for hand-motion bandwidth (0-10 Hz). */
+#define EMA_ALPHA                         0.20f
 
 #define QUEUE_RECV_TIMEOUT_MS   	200u
 
@@ -119,7 +136,7 @@ static StackType_t xDetectionTaskStack[DETECTION_TASK_STACK_SIZE];
 static StackType_t xUartTxTaskStack[UART_TASK_STACK_SIZE];
 
 static uint8_t ucSensorQueueStorage[SENSOR_QUEUE_LENGTH * sizeof(ts_Bmi160_Data)];
-static uint8_t ucDetectionQueueStorage[DETECTION_QUEUE_LENGTH * sizeof(ts_Bmi160_Data)];
+static uint8_t ucDetectionQueueStorage[DETECTION_QUEUE_LENGTH * sizeof(ts_Processed_Data)];
 static uint8_t ucUartTxQueueStorage[UART_QUEUE_LENGTH * sizeof(UartMsg_t)];
 
 volatile SystemDiagnostics_t g_diag = { 0 };
@@ -228,17 +245,52 @@ void vSensorReadTask(void *argument)
 void vDataProcessingTask(void *argument)
 {
 	Debug_Print("[PROC TASK CREATED]\r\n");
+
+	/* EMA filter state */
+	static float    ema_aX = 0.0f, ema_aY = 0.0f, ema_aZ = 0.0f;
+	static float    ema_gX = 0.0f, ema_gY = 0.0f, ema_gZ = 0.0f;
+	static uint8_t  ema_init = 0u;
+	static uint32_t seqCounter = 0u;
+
 	for (;;)
 	{
-
 		ts_Bmi160_Data rawData;
 
 		if (xQueueReceive(xSensorQueue, &rawData, pdMS_TO_TICKS(QUEUE_RECV_TIMEOUT_MS)) == pdTRUE)
 		{
+			if (!ema_init)
+			{
+				ema_aX = rawData.scaledAccX;
+				ema_aY = rawData.scaledAccY;
+				ema_aZ = rawData.scaledAccZ;
+				ema_gX = rawData.scaledGyrX;
+				ema_gY = rawData.scaledGyrY;
+				ema_gZ = rawData.scaledGyrZ;
+				ema_init = 1u;
+			}
+			else
+			{
+				const float a = EMA_ALPHA;
+				const float b = 1.0f - EMA_ALPHA;
+				ema_aX = a * rawData.scaledAccX + b * ema_aX;
+				ema_aY = a * rawData.scaledAccY + b * ema_aY;
+				ema_aZ = a * rawData.scaledAccZ + b * ema_aZ;
+				ema_gX = a * rawData.scaledGyrX + b * ema_gX;
+				ema_gY = a * rawData.scaledGyrY + b * ema_gY;
+				ema_gZ = a * rawData.scaledGyrZ + b * ema_gZ;
+			}
 
-//TODO: data proccessing algorithm need to be implemented.
+			ts_Processed_Data out;
+			out.raw   = rawData;
+			out.fAccX = ema_aX;
+			out.fAccY = ema_aY;
+			out.fAccZ = ema_aZ;
+			out.fGyrX = ema_gX;
+			out.fGyrY = ema_gY;
+			out.fGyrZ = ema_gZ;
+			out.seq   = seqCounter++;
 
-			if (xQueueSend(xDetectionQueue, &rawData,pdMS_TO_TICKS(5)) != pdTRUE)
+			if (xQueueSend(xDetectionQueue, &out, pdMS_TO_TICKS(5)) != pdTRUE)
 			{
 				g_diag.detection_queue_full++;
 			}
@@ -254,14 +306,13 @@ void vCircleDetectionTask(void *argument)
 {
 	Debug_Print("[DETECT TASK CREATED]\r\n");
 
-	/* Sliding window buffer */
-	static ts_Bmi160_Data window[WINDOW_SIZE];
+	static ts_Processed_Data window[WINDOW_SIZE];
 	static uint8_t windowIndex = 0;
 	static uint8_t windowFull = 0;
 
 	for (;;)
 	{
-		ts_Bmi160_Data localData;
+		ts_Processed_Data localData;
 
 		if (xQueueReceive(xDetectionQueue, &localData, pdMS_TO_TICKS(QUEUE_RECV_TIMEOUT_MS)) == pdTRUE)
 		{
@@ -282,8 +333,8 @@ void vCircleDetectionTask(void *argument)
 				float quarter[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
 				{
-					gyroZSum += window[i].scaledGyrZ;
-					quarter[i / (WINDOW_SIZE / 4)] += window[i].scaledGyrZ;
+					gyroZSum += window[i].fGyrZ;
+					quarter[i / (WINDOW_SIZE / 4)] += window[i].fGyrZ;
 				}
 
 				uint8_t directionConsistent = 1;
@@ -301,8 +352,8 @@ void vCircleDetectionTask(void *argument)
 				float meanX = 0.0f, meanY = 0.0f;
 				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
 				{
-					meanX += window[i].scaledAccX;
-					meanY += window[i].scaledAccY;
+					meanX += window[i].fAccX;
+					meanY += window[i].fAccY;
 				}
 				meanX /= (float) WINDOW_SIZE;
 				meanY /= (float) WINDOW_SIZE;
@@ -312,8 +363,8 @@ void vCircleDetectionTask(void *argument)
 
 				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
 				{
-					float dx = window[i].scaledAccX - meanX;
-					float dy = window[i].scaledAccY - meanY;
+					float dx = window[i].fAccX - meanX;
+					float dy = window[i].fAccY - meanY;
 
 					varX  += dx * dx;
 					varY  += dy * dy;
@@ -321,8 +372,8 @@ void vCircleDetectionTask(void *argument)
 
 					if (i > 0)
 					{
-						float prev_dx = window[i - 1].scaledAccX - meanX;
-						float prev_dy = window[i - 1].scaledAccY - meanY;
+						float prev_dx = window[i - 1].fAccX - meanX;
+						float prev_dy = window[i - 1].fAccY - meanY;
 
 						if ((prev_dx > 0.0f && dx <= 0.0f) || (prev_dx < 0.0f && dx >= 0.0f))
 							zcx++;
@@ -447,7 +498,7 @@ int main(void)
 
 	xSensorQueue = xQueueCreateStatic(SENSOR_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), ucSensorQueueStorage, &xSensorQueueCB);
 
-	xDetectionQueue = xQueueCreateStatic(DETECTION_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), ucDetectionQueueStorage, &xDetectionQueueCB);
+	xDetectionQueue = xQueueCreateStatic(DETECTION_QUEUE_LENGTH, sizeof(ts_Processed_Data), ucDetectionQueueStorage, &xDetectionQueueCB);
 
 	xUartTxQueue = xQueueCreateStatic(UART_QUEUE_LENGTH, sizeof(UartMsg_t), ucUartTxQueueStorage, &xUartTxQueueCB);
 
