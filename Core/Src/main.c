@@ -34,6 +34,8 @@
 #include "interrupt.h"
 #include "filter.h"
 #include "detection.h"
+#include "telemetry.h"
+#include "uart_tx.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -42,12 +44,6 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef struct
-{
-	char msg[96];
-	uint16_t len;
-} UartMsg_t;
-
 typedef struct
 {
 	uint32_t sensor_read_errors;
@@ -66,38 +62,29 @@ typedef struct
 #define SENSOR_TASK_STACK_SIZE      1024u
 #define PROCESSING_TASK_STACK_SIZE  512u
 #define DETECTION_TASK_STACK_SIZE   512u
-#define UART_TASK_STACK_SIZE        512u
 
 #define SENSOR_TASK_PRIORITY        3u
 #define PROCESSING_TASK_PRIORITY    2u
 #define DETECTION_TASK_PRIORITY     2u
-#define UART_TASK_PRIORITY     		1u
 
 #define SENSOR_QUEUE_LENGTH         5u
 #define DETECTION_QUEUE_LENGTH      5u
-#define UART_QUEUE_LENGTH           32u
 
 #define QUEUE_RECV_TIMEOUT_MS   	200u
 
-extern UART_HandleTypeDef huart[];
-
 static QueueHandle_t xSensorQueue = NULL;
 static QueueHandle_t xDetectionQueue = NULL;
-static QueueHandle_t xUartTxQueue = NULL;
 
 static TaskHandle_t xSensorTaskHandle = NULL;
 static TaskHandle_t xProcessingTaskHandle = NULL;
 static TaskHandle_t xDetectionTaskHandle = NULL;
-static TaskHandle_t xUartTxTaskHandle = NULL;
 
 static StaticQueue_t xSensorQueueCB;
 static StaticQueue_t xDetectionQueueCB;
-static StaticQueue_t xUartTxQueueCB;
 
 static StaticTask_t xSensorTaskTCB;
 static StaticTask_t xProcessingTaskTCB;
 static StaticTask_t xDetectionTaskTCB;
-static StaticTask_t xUartTxTaskTCB;
 
 static SemaphoreHandle_t xBmi160DataReadySem = NULL;
 static StaticSemaphore_t xBmi160DataReadySemBuffer;
@@ -115,11 +102,9 @@ static StaticSemaphore_t xBmi160DataReadySemBuffer;
 static StackType_t xSensorTaskStack[SENSOR_TASK_STACK_SIZE];
 static StackType_t xProcessingTaskStack[PROCESSING_TASK_STACK_SIZE];
 static StackType_t xDetectionTaskStack[DETECTION_TASK_STACK_SIZE];
-static StackType_t xUartTxTaskStack[UART_TASK_STACK_SIZE];
 
 static uint8_t ucSensorQueueStorage[SENSOR_QUEUE_LENGTH * sizeof(ts_Bmi160_Data)];
 static uint8_t ucDetectionQueueStorage[DETECTION_QUEUE_LENGTH * sizeof(ts_Processed_Data)];
-static uint8_t ucUartTxQueueStorage[UART_QUEUE_LENGTH * sizeof(UartMsg_t)];
 
 volatile SystemDiagnostics_t g_diag = { 0 };
 
@@ -256,6 +241,7 @@ void vCircleDetectionTask(void *argument)
 	Debug_Print("[DETECT TASK CREATED]\r\n");
 
 	Detection_Init();
+	Telemetry_Init();
 
 	for (;;)
 	{
@@ -264,6 +250,14 @@ void vCircleDetectionTask(void *argument)
 		if (xQueueReceive(xDetectionQueue, &sample, pdMS_TO_TICKS(QUEUE_RECV_TIMEOUT_MS)) == pdTRUE)
 		{
 			ts_Detection_Result result = Detection_Process(&sample);
+
+			uint16_t flags = 0u;
+			if (result.detected)
+			{
+				flags |= TELEMETRY_FLAG_DETECTION;
+			}
+
+			Telemetry_SendSensorFrame(&sample, flags);
 
 			if (result.detected)
 			{
@@ -281,10 +275,6 @@ void vCircleDetectionTask(void *argument)
 
 					xQueueReset(xDetectionQueue);
 				}
-			//TODO: UART packet format implementation has to be done.
-
-			//TODO: Sending uart data.
-
 		}
 		else
 		{
@@ -293,52 +283,23 @@ void vCircleDetectionTask(void *argument)
 	}
 }
 
-void vUartTxTask(void *argument)
-{
-	UartMsg_t pkt;
-	for (;;)
-	{
-		if (xQueueReceive(xUartTxQueue, &pkt, portMAX_DELAY) == pdTRUE)
-		{
-			SerialReadWrite_t txCtx;
-			txCtx.index = USER_SERIAL_INDEX;
-			txCtx.ptr = (uint8_t*) pkt.msg;
-			txCtx.length = pkt.len;
-			if (Serial_Write_DMA(&txCtx, pkt.len) == E_SERIAL_ERR_NONE)
-			{
-				ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-			}
-			else
-			{
-				//TODO: error handling
-			}
-
-		}
-	}
-}
-
 void Debug_Print(const char *msg)
 {
-	if (msg == NULL || xUartTxQueue == NULL)
-		return;
-	UartMsg_t pkt;
-	int written = snprintf(pkt.msg, sizeof(pkt.msg), "%s", msg);
-
-	if (written < 0)
+	if (msg == NULL)
 	{
 		return;
 	}
 
-	if (written >= sizeof(pkt.msg))
+	uint8_t buf[UART_TX_MSG_MAX];
+	int written = snprintf((char*) buf, sizeof(buf), "%s", msg);
+
+	if (written <= 0)
 	{
-		pkt.len = sizeof(pkt.msg) - 1u;
+		return;
 	}
-	else
-	{
-		pkt.len = (uint16_t) written;
-	}
-	xQueueSend(xUartTxQueue, &pkt, pdMS_TO_TICKS(5));
+
+	uint16_t len = (written >= (int) sizeof(buf)) ? (sizeof(buf) - 1u) : (uint16_t) written;
+	UartTx_SendBytes(buf, len);
 }
 /* USER CODE END 0 */
 
@@ -363,17 +324,17 @@ int main(void)
 	Serial_Open(&serialIndex);
 	Serial_Ioctl(E_SERIAL_IOCTL_ENABLE_DMA_TX, &serialIndex); //DMA started
 
+	UartTx_Init();
+
 	printf("Serial driver started\r\n");
 
 	xSensorQueue = xQueueCreateStatic(SENSOR_QUEUE_LENGTH, sizeof(ts_Bmi160_Data), ucSensorQueueStorage, &xSensorQueueCB);
 
 	xDetectionQueue = xQueueCreateStatic(DETECTION_QUEUE_LENGTH, sizeof(ts_Processed_Data), ucDetectionQueueStorage, &xDetectionQueueCB);
 
-	xUartTxQueue = xQueueCreateStatic(UART_QUEUE_LENGTH, sizeof(UartMsg_t), ucUartTxQueueStorage, &xUartTxQueueCB);
-
 	xBmi160DataReadySem = xSemaphoreCreateBinaryStatic(&xBmi160DataReadySemBuffer);
 
-	if (xSensorQueue == NULL || xDetectionQueue == NULL || xUartTxQueue == NULL || xBmi160DataReadySem == NULL)
+	if (xSensorQueue == NULL || xDetectionQueue == NULL || xBmi160DataReadySem == NULL)
 	{
 		printf("FreeRTOS object creation failed!\r\n");
 		Error_Handler();
@@ -385,9 +346,7 @@ int main(void)
 
 	xDetectionTaskHandle = xTaskCreateStatic(vCircleDetectionTask, "CircDet", DETECTION_TASK_STACK_SIZE, NULL, DETECTION_TASK_PRIORITY, xDetectionTaskStack, &xDetectionTaskTCB);
 
-	xUartTxTaskHandle = xTaskCreateStatic(vUartTxTask, "UartTx", UART_TASK_STACK_SIZE, NULL, UART_TASK_PRIORITY, xUartTxTaskStack, &xUartTxTaskTCB);
-
-	if (xSensorTaskHandle == NULL || xProcessingTaskHandle == NULL || xDetectionTaskHandle == NULL || xUartTxTaskHandle == NULL)
+	if (xSensorTaskHandle == NULL || xProcessingTaskHandle == NULL || xDetectionTaskHandle == NULL)
 	{
 		printf("Task creation failed!\r\n");
 		Error_Handler();
@@ -457,33 +416,11 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-	if (huart->Instance == USART2)
-	{
-		BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-		if (xUartTxTaskHandle != NULL)
-		{
-			vTaskNotifyGiveFromISR(xUartTxTaskHandle, &xHigherPriorityTaskWoken);
-			portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-		}
-	}
-}
-
 int _write(int file, char *ptr, int len)
 {
-
-//	HAL_UART_Transmit(&huart2, (uint8_t*) ptr, len, HAL_MAX_DELAY);
 	 if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED)
 	    {
-	        if (xUartTxQueue != NULL)
-	        {
-	            UartMsg_t pkt;
-	            int written = snprintf(pkt.msg, sizeof(pkt.msg), "%.*s", len, ptr);
-	            pkt.len = (uint16_t)((written > 0) ? written : 0);
-	            xQueueSend(xUartTxQueue, &pkt, pdMS_TO_TICKS(5));
-	        }
+		UartTx_SendBytes((const uint8_t*) ptr, (uint16_t) len);
 	        return len;
 	    }
 
