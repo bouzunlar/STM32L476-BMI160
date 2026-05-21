@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include "semphr.h"
 #include "bmi160_driver.h"
 #include "serial_driver.h"
@@ -74,9 +75,8 @@ typedef struct
 #define UART_QUEUE_LENGTH           32u
 #define WINDOW_SIZE                 32u
 
-#define GYRO_Z_THRESHOLD_RAW        1966
-#define ACCEL_XY_VARIANCE_THRESHOLD 2000000L
-#define GYRO_Z_SUM_THRESHOLD  (WINDOW_SIZE * GYRO_Z_THRESHOLD_RAW * 7 / 10)
+#define GYRO_Z_MEAN_DPS_THRESHOLD         120.0f  /* mean |rotation| over window */
+#define ACCEL_XY_VARIANCE_G2_THRESHOLD    0.25f   /* variance in g²              */
 
 #define QUEUE_RECV_TIMEOUT_MS   	200u
 
@@ -206,11 +206,14 @@ void vSensorReadTask(void *argument)
 
 			static uint32_t dbgCounter = 0;
 
-			if ((dbgCounter++ % 10) == 0)
+			if ((dbgCounter++ % 20) == 0)
 			{
 				char debugMsg[128];
 
-				snprintf(debugMsg, sizeof(debugMsg), "GYRO -> X: %5d | Y: %5d | Z: %5d  ||  ACCEL -> X: %5d | Y: %5d | Z: %5d\r\n", localData.rawGyrX, localData.rawGyrY, localData.rawGyrZ, localData.rawAccX, localData.rawAccY, localData.rawAccZ);
+				snprintf(debugMsg, sizeof(debugMsg),
+					"GYRO[dps] X:%7.2f Y:%7.2f Z:%7.2f | ACC[g] X:%6.3f Y:%6.3f Z:%6.3f\r\n",
+					localData.scaledGyrX, localData.scaledGyrY, localData.scaledGyrZ,
+					localData.scaledAccX, localData.scaledAccY, localData.scaledAccZ);
 
 				Debug_Print(debugMsg);
 			}
@@ -275,19 +278,19 @@ void vCircleDetectionTask(void *argument)
 			if (windowFull)
 			{
 
-				int32_t gyroZSum = 0;
-				int32_t quarter[4] = { 0, 0, 0, 0 };
+				float gyroZSum = 0.0f;
+				float quarter[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
 				{
-					gyroZSum += window[i].rawGyrZ;
-					quarter[i / (WINDOW_SIZE / 4)] += window[i].rawGyrZ;
+					gyroZSum += window[i].scaledGyrZ;
+					quarter[i / (WINDOW_SIZE / 4)] += window[i].scaledGyrZ;
 				}
 
 				uint8_t directionConsistent = 1;
-				int8_t expectedSign = (gyroZSum > 0) ? 1 : -1;
+				int8_t expectedSign = (gyroZSum > 0.0f) ? 1 : -1;
 				for (uint8_t q = 0; q < 4; q++)
 				{
-					int8_t qSign = (quarter[q] > 0) ? 1 : -1;
+					int8_t qSign = (quarter[q] > 0.0f) ? 1 : -1;
 					if (qSign != expectedSign)
 					{
 						directionConsistent = 0;
@@ -295,47 +298,52 @@ void vCircleDetectionTask(void *argument)
 					}
 				}
 
-				int32_t meanX = 0, meanY = 0;
+				float meanX = 0.0f, meanY = 0.0f;
 				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
 				{
-					meanX += window[i].rawAccX;
-					meanY += window[i].rawAccY;
+					meanX += window[i].scaledAccX;
+					meanY += window[i].scaledAccY;
 				}
-				meanX /= (int32_t) WINDOW_SIZE;
-				meanY /= (int32_t) WINDOW_SIZE;
+				meanX /= (float) WINDOW_SIZE;
+				meanY /= (float) WINDOW_SIZE;
 
-				int64_t varX = 0, varY = 0, covXY = 0;
+				float varX = 0.0f, varY = 0.0f, covXY = 0.0f;
 				uint8_t zcx = 0, zcy = 0;
 
 				for (uint8_t i = 0; i < WINDOW_SIZE; i++)
 				{
-					int32_t dx = window[i].rawAccX - meanX;
-					int32_t dy = window[i].rawAccY - meanY;
+					float dx = window[i].scaledAccX - meanX;
+					float dy = window[i].scaledAccY - meanY;
 
-					varX += (int64_t) dx * dx;
-					varY += (int64_t) dy * dy;
-					covXY += (int64_t) dx * dy;
+					varX  += dx * dx;
+					varY  += dy * dy;
+					covXY += dx * dy;
 
 					if (i > 0)
 					{
-						int32_t prev_dx = window[i - 1].rawAccX - meanX;
-						int32_t prev_dy = window[i - 1].rawAccY - meanY;
+						float prev_dx = window[i - 1].scaledAccX - meanX;
+						float prev_dy = window[i - 1].scaledAccY - meanY;
 
-						if ((prev_dx > 0 && dx <= 0) || (prev_dx < 0 && dx >= 0))
+						if ((prev_dx > 0.0f && dx <= 0.0f) || (prev_dx < 0.0f && dx >= 0.0f))
 							zcx++;
-						if ((prev_dy > 0 && dy <= 0) || (prev_dy < 0 && dy >= 0))
+						if ((prev_dy > 0.0f && dy <= 0.0f) || (prev_dy < 0.0f && dy >= 0.0f))
 							zcy++;
 					}
 				}
-				varX /= WINDOW_SIZE;
-				varY /= WINDOW_SIZE;
-				covXY /= WINDOW_SIZE;
+				varX  /= (float) WINDOW_SIZE;
+				varY  /= (float) WINDOW_SIZE;
+				covXY /= (float) WINDOW_SIZE;
 
-				uint8_t notStraightLine = ((covXY * covXY) < (varX * varY / 2));
-
+				uint8_t notStraightLine = ((covXY * covXY) < (varX * varY * 0.5f));
 				uint8_t isFullCircle = (zcx >= 2) && (zcy >= 2);
+				float   meanGyroZ       = fabsf(gyroZSum) / (float) WINDOW_SIZE;
 
-				if (directionConsistent && notStraightLine && isFullCircle && abs(gyroZSum) > GYRO_Z_SUM_THRESHOLD && varX > ACCEL_XY_VARIANCE_THRESHOLD && varY > ACCEL_XY_VARIANCE_THRESHOLD)
+				if (directionConsistent &&
+					notStraightLine &&
+					isFullCircle &&
+					meanGyroZ > GYRO_Z_MEAN_DPS_THRESHOLD &&
+					varX > ACCEL_XY_VARIANCE_G2_THRESHOLD &&
+					varY > ACCEL_XY_VARIANCE_G2_THRESHOLD)
 				{
 					circleFlag = 1;
 
