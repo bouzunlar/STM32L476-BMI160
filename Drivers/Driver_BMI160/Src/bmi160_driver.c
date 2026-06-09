@@ -97,9 +97,10 @@ te_Bmi160_ErrorCodes Bmi160_Open(void *vpParam)
 {
 	IMU6x_vHWInit();
 
-	if (IMU6x_uReadWhoAmI() != BMI160_CHIP_ID)
+	uint8_t id = IMU6x_uReadWhoAmI();
+	if (id != BMI160_CHIP_ID)
 	{
-		printf("BMI160: Wrong ID!!!\r\n");
+		printf("BMI160: Wrong ID — got 0x%02X, expected 0x%02X\r\n", id, BMI160_CHIP_ID);
 		return E_BMI160_ERR_WRONG_ID;
 	}
 
@@ -265,7 +266,8 @@ static void bmi160_int1_isr(void *context)
 int8_t BMI160_IMU_TEST(uint32_t timeout_ms)
 {
 	uint32_t timeCnt = 0u;
-	ts_Bmi160_Data xData;
+	/* Cppcheck error is fixed */
+	ts_Bmi160_Data xData = { 0 };
 
 	if (Bmi160_Open(NULL) != E_BMI160_ERR_NONE)
 	{
