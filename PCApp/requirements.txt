@@ -1,0 +1,9 @@
+# PC-side tools for the STM32 + BMI160 telemetry project.
+#
+#   protocol.py      : standard library only
+#   replay.py        : standard library only
+#   record.py        : needs pyserial
+#   dashboard_qt.py  : needs pyserial + PyQt6
+#
+pyserial>=3.5
+PyQt6>=6.5
